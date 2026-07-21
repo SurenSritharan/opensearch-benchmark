@@ -1098,6 +1098,9 @@ class VectorSearchPartitionParamSource(VectorDataSetPartitionParamSource):
     PARAMS_NAME_SOURCE = "_source"
     PARAMS_NAME_ALLOW_PARTIAL_RESULTS = "allow_partial_search_results"
     PARAMS_NAME_OVERSAMPLE_FACTOR = "oversample_factor"
+    PARAMS_NAME_EF_SEARCH = "ef_search"
+    PARAMS_NAME_OVERQUERY_FACTOR = "overquery_factor"
+    PARAMS_NAME_METHOD_PARAMETERS = "method_parameters"
     PARAMS_NAME_RESCORE = "rescore"
     PARAMS_NAME_SPACE_TYPE = "space_type"
     PARAMS_NAME_MAX_DISTANCE = "max_distance"
@@ -1120,6 +1123,8 @@ class VectorSearchPartitionParamSource(VectorDataSetPartitionParamSource):
         self.oversample_factor = params.get(self.PARAMS_NAME_OVERSAMPLE_FACTOR)
         has_radial = (self.PARAMS_NAME_MAX_DISTANCE in params or self.PARAMS_NAME_MIN_SCORE in params
                       or self.PARAMS_NAME_MAX_DISTANCE in query_params or self.PARAMS_NAME_MIN_SCORE in query_params)
+        self.ef_search = params.get(self.PARAMS_NAME_EF_SEARCH)
+        self.overquery_factor = params.get(self.PARAMS_NAME_OVERQUERY_FACTOR)
         if self.oversample_factor and has_radial:
             raise exceptions.InvalidSyntax(
                 "'oversample_factor' cannot be used with 'max_distance' or 'min_score'. "
@@ -1262,6 +1267,14 @@ class VectorSearchPartitionParamSource(VectorDataSetPartitionParamSource):
             query.update({
                 "filter": efficient_filter,
             })
+
+        if self.ef_search or self.overquery_factor:
+            method_params = {}
+            if self.ef_search:
+                method_params[self.PARAMS_NAME_EF_SEARCH] = self.ef_search
+            if self.overquery_factor:
+                method_params[self.PARAMS_NAME_OVERQUERY_FACTOR] = self.overquery_factor
+            query[self.PARAMS_NAME_METHOD_PARAMETERS] = method_params
 
         if self.oversample_factor:
             query[self.PARAMS_NAME_RESCORE] = {
