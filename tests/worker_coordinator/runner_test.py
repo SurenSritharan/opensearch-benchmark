@@ -1099,6 +1099,68 @@ class BulkIndexRunnerTests(TestCase):
 
         opensearch.bulk.assert_called_with(body=bulk_params["body"], params={})
 
+    @mock.patch('osbenchmark.worker_coordinator.runner.asyncio.sleep', return_value=None)
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_end')
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_start')
+    @mock.patch("opensearchpy.OpenSearch")
+    @run_async
+    async def test_bulk_index_retries_on_429_and_succeeds(
+        self, opensearch, on_client_request_start, on_client_request_end, mock_sleep
+    ):
+        """Bulk retries on 429 and returns success on the second attempt."""
+        bulk_response = {"errors": False, "took": 5}
+        opensearch.bulk.side_effect = [
+            opensearchpy.exceptions.TransportError(429, "too_many_requests", {}),
+            as_future(io.StringIO(json.dumps(bulk_response))),
+        ]
+
+        bulk = runner.BulkIndex()
+        bulk_params = {
+            "body": "action_meta_data\nindex_line\n",
+            "action-metadata-present": True,
+            "bulk-size": 1,
+            "unit": "docs",
+            "retries": 1,
+            "retry-wait-period": 0.1,
+        }
+
+        result = await bulk(opensearch, bulk_params)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(2, opensearch.bulk.call_count)
+        mock_sleep.assert_called_once()
+        actual_sleep = mock_sleep.call_args[0][0]
+        self.assertGreaterEqual(actual_sleep, 0.05)  # equal jitter floor = cap/2
+        self.assertLessEqual(actual_sleep, 0.1)      # equal jitter ceiling = cap
+
+    @mock.patch('osbenchmark.worker_coordinator.runner.asyncio.sleep', return_value=None)
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_end')
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_start')
+    @mock.patch("opensearchpy.OpenSearch")
+    @run_async
+    async def test_bulk_index_raises_after_retries_exhausted_on_429(
+        self, opensearch, on_client_request_start, on_client_request_end, mock_sleep
+    ):
+        """Bulk re-raises 429 TransportError once all retries are exhausted."""
+        opensearch.bulk.side_effect = opensearchpy.exceptions.TransportError(429, "too_many_requests", {})
+
+        bulk = runner.BulkIndex()
+        bulk_params = {
+            "body": "action_meta_data\nindex_line\n",
+            "action-metadata-present": True,
+            "bulk-size": 1,
+            "unit": "docs",
+            "retries": 2,
+            "retry-wait-period": 0.1,
+        }
+
+        with self.assertRaises(opensearchpy.exceptions.TransportError) as ctx:
+            await bulk(opensearch, bulk_params)
+
+        self.assertEqual(429, ctx.exception.status_code)
+        # 1 initial attempt + 2 retries = 3 total calls
+        self.assertEqual(3, opensearch.bulk.call_count)
+
 
 class ForceMergeRunnerTests(TestCase):
     @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_end')
@@ -7953,3 +8015,65 @@ class BulkVectorDataSetTests(TestCase):
         self.assertEqual(1, result["error-count"])
         self.assertFalse(result["success"])
         opensearch.bulk.assert_called_once()
+
+    @mock.patch('osbenchmark.worker_coordinator.runner.asyncio.sleep', return_value=None)
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_end')
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_start')
+    @mock.patch("opensearchpy.OpenSearch")
+    @run_async
+    async def test_bulk_vector_retries_on_429_and_succeeds(
+        self, opensearch, on_client_request_start, on_client_request_end, mock_sleep
+    ):
+        """BulkVectorDataSet retries on a 429 TransportError and returns success on the next attempt."""
+        response = self._bulk_response([self._ok_item(0), self._ok_item(1)])
+        opensearch.bulk.side_effect = [
+            opensearchpy.exceptions.TransportError(429, "too_many_requests", {}),
+            as_future(response),
+        ]
+        opensearch.return_raw_response.return_value = None
+
+        bulk = runner.BulkVectorDataSet()
+        params = {
+            "body": ["action0", "doc0", "action1", "doc1"],
+            "action-metadata-present": True,
+            "retries": 1,
+            "index": "test",
+            "retry-wait-period": 0.1,
+        }
+
+        result = await bulk(opensearch, params)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(2, opensearch.bulk.call_count)
+        mock_sleep.assert_called_once()
+        actual_sleep = mock_sleep.call_args[0][0]
+        self.assertGreaterEqual(actual_sleep, 0.05)  # equal jitter floor = cap/2
+        self.assertLessEqual(actual_sleep, 0.1)      # equal jitter ceiling = cap
+
+    @mock.patch('osbenchmark.worker_coordinator.runner.asyncio.sleep', return_value=None)
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_end')
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_start')
+    @mock.patch("opensearchpy.OpenSearch")
+    @run_async
+    async def test_bulk_vector_raises_after_retries_exhausted_on_429(
+        self, opensearch, on_client_request_start, on_client_request_end, mock_sleep
+    ):
+        """BulkVectorDataSet re-raises a 429 TransportError once all retries are exhausted."""
+        opensearch.bulk.side_effect = opensearchpy.exceptions.TransportError(429, "too_many_requests", {})
+        opensearch.return_raw_response.return_value = None
+
+        bulk = runner.BulkVectorDataSet()
+        params = {
+            "body": ["action0", "doc0", "action1", "doc1"],
+            "action-metadata-present": True,
+            "retries": 2,
+            "index": "test",
+            "retry-wait-period": 0.1,
+        }
+
+        with self.assertRaises(opensearchpy.exceptions.TransportError) as ctx:
+            await bulk(opensearch, params)
+
+        self.assertEqual(429, ctx.exception.status_code)
+        # 1 initial attempt + 2 retries = 3 total calls
+        self.assertEqual(3, opensearch.bulk.call_count)

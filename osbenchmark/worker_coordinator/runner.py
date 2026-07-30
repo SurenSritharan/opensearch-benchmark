@@ -60,6 +60,7 @@ from typing import Any, Dict, List, Optional
 
 import ijson
 
+import opensearchpy
 from opensearchpy import ConnectionTimeout
 from opensearchpy import NotFoundError
 
@@ -517,8 +518,16 @@ class BulkIndex(Runner):
          in ``benchmarks/worker_coordinator``.
         * ``request-timeout``: a non-negative float indicating the client-side timeout for the operation.  If not present, defaults to
          ``None`` and potentially falls back to the global timeout setting.
+        * ``retries``: (optional, default 0) Number of times to retry the bulk request when a 429 (too many requests)
+         response is received.
+        * ``retry-wait-period``: (optional, default 0.5) Initial wait in seconds before the first retry; doubles on
+         each subsequent attempt.
+        * ``retry-max-wait-period``: (optional, default 60) Maximum wait in seconds between retries.
         """
         detailed_results = params.get("detailed-results", False)
+        retries = parse_int_parameter("retries", params, 0)
+        retry_wait_period = params.get("retry-wait-period", 0.5)
+        retry_max_wait_period = params.get("retry-max-wait-period", 60)
 
         bulk_params = {}
         if "pipeline" in params:
@@ -537,27 +546,41 @@ class BulkIndex(Runner):
         # errors have occurred we only need a small amount of information from the potentially large response.
         if not detailed_results:
             opensearch.return_raw_response()
-        request_context_holder.on_client_request_start()
 
-        if with_action_metadata:
-            api_kwargs.pop("index", None)
-            # only half of the lines are documents
-            response = await opensearch.bulk(params=bulk_params, **api_kwargs)
-        else:
-            response = await opensearch.bulk(doc_type=params.get("type"), params=bulk_params, **api_kwargs)
+        for attempt in range(retries + 1):
+            last_attempt = attempt == retries
+            try:
+                request_context_holder.on_client_request_start()
+                if with_action_metadata:
+                    api_kwargs.pop("index", None)
+                    # only half of the lines are documents
+                    response = await opensearch.bulk(params=bulk_params, **api_kwargs)
+                else:
+                    response = await opensearch.bulk(doc_type=params.get("type"), params=bulk_params, **api_kwargs)
+                request_context_holder.on_client_request_end()
+            except opensearchpy.exceptions.TransportError as e:
+                if e.status_code == 429 and not last_attempt:
+                    cap = min(retry_wait_period * (2 ** attempt), retry_max_wait_period)
+                    backoff = cap / 2 + random.uniform(0, cap / 2)
+                    self.logger.warning(
+                        "Bulk request rejected with 429 (too many requests). Retrying attempt %d of %d in [%.2f] seconds.",
+                        attempt + 1, retries, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                raise
 
-        request_context_holder.on_client_request_end()
-        stats = self.detailed_stats(params, response) if detailed_results else self.simple_stats(bulk_size, unit, response)
+            stats = self.detailed_stats(params, response) if detailed_results else self.simple_stats(bulk_size, unit, response)
 
-        meta_data = {
-            "index": params.get("index"),
-            "weight": bulk_size,
-            "unit": unit,
-        }
-        meta_data.update(stats)
-        if not stats["success"]:
-            meta_data["error-type"] = "bulk"
-        return meta_data
+            meta_data = {
+                "index": params.get("index"),
+                "weight": bulk_size,
+                "unit": unit,
+            }
+            meta_data.update(stats)
+            if not stats["success"]:
+                meta_data["error-type"] = "bulk"
+            return meta_data
 
     def detailed_stats(self, params, response):
         ops = {}
@@ -999,6 +1022,17 @@ class BulkVectorDataSet(Runner):
                 if total_error_count > 0:
                     meta_data["error-type"] = "bulk"
                 return meta_data
+            except opensearchpy.exceptions.TransportError as e:
+                if e.status_code == 429 and attempt < retries - 1:
+                    cap = min(retry_wait_period * (2 ** attempt), retry_max_wait_period)
+                    backoff = cap / 2 + random.uniform(0, cap / 2)
+                    self.logger.warning(
+                        "Bulk vector ingestion rejected with 429 (too many requests). Retrying attempt %d in [%.2f] seconds.",
+                        attempt, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                else:
+                    raise
             except ConnectionTimeout:
                 backoff = min(retry_wait_period * (2 ** attempt), retry_max_wait_period)
                 self.logger.warning("Bulk vector ingestion timed out. Retrying attempt %d in [%.2f] seconds.",
@@ -3051,8 +3085,9 @@ class Retry(Runner, Delegator):
             except opensearchpy.exceptions.TransportError as e:
                 if last_attempt or not retry_on_timeout:
                     raise e
-                elif e.status_code == 408:
-                    self.logger.info("[%s] has timed out. Retrying in [%.2f] seconds.", repr(self.delegate), sleep_time)
+                elif e.status_code in (408, 429):
+                    self.logger.info("[%s] received status %d. Retrying in [%.2f] seconds.",
+                                     repr(self.delegate), e.status_code, sleep_time)
                     await asyncio.sleep(sleep_time)
                 else:
                     raise e
