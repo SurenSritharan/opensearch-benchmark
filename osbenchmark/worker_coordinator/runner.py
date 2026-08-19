@@ -1682,7 +1682,11 @@ class Query(Runner):
                     self.logger.info("No neighbors are provided for recall calculation")
                     return 0.0
                 min_num_of_results = min(top_k, len(neighbors))
-                last_neighbor_is_negative_1 = int(neighbors[min_num_of_results-1]) == -1
+                try:
+                    last_neighbor_is_negative_1 = int(neighbors[min_num_of_results-1]) == -1
+                except (ValueError, TypeError):
+                    # Non-integer string IDs (e.g. "doc-abc") are never the -1 sentinel
+                    last_neighbor_is_negative_1 = False
                 truth_set = neighbors[:min_num_of_results]
                 if last_neighbor_is_negative_1:
                     self.logger.debug("Last neighbor is -1")
