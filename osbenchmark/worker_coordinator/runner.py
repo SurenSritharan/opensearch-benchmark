@@ -1024,8 +1024,10 @@ class BulkVectorDataSet(Runner):
                     meta_data["error-type"] = "bulk"
                 if post_ingest_refresh:
                     self.logger.info("Issuing post-ingest refresh on [%s].", meta_data["index"])
+                    refresh_start = time.perf_counter()
                     await opensearch.indices.refresh(index=meta_data["index"])
                     meta_data["post-ingest-refresh"] = True
+                    meta_data["refresh-took-millis"] = (time.perf_counter() - refresh_start) * 1000
                 return meta_data
             except opensearchpy.exceptions.TransportError as e:
                 if e.status_code == 429 and attempt < retries - 1:

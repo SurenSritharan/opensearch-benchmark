@@ -8101,6 +8101,8 @@ class BulkVectorDataSetTests(TestCase):
 
         self.assertTrue(result["success"])
         self.assertTrue(result.get("post-ingest-refresh"))
+        self.assertIn("refresh-took-millis", result)
+        self.assertGreaterEqual(result["refresh-took-millis"], 0)
         opensearch.indices.refresh.assert_called_once_with(index="test-index")
 
     @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_end')
