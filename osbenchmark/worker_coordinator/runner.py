@@ -968,6 +968,7 @@ class BulkVectorDataSet(Runner):
         unit = params.get("unit", "docs")
         retries = parse_int_parameter("retries", params, 0) + 1
         detailed_results = params.get("detailed-results", True)
+        post_ingest_refresh = params.get("post-ingest-refresh", False)
 
         if not detailed_results:
             opensearch.return_raw_response()
@@ -1021,6 +1022,10 @@ class BulkVectorDataSet(Runner):
                 meta_data["success"] = total_error_count == 0
                 if total_error_count > 0:
                     meta_data["error-type"] = "bulk"
+                if post_ingest_refresh:
+                    self.logger.info("Issuing post-ingest refresh on [%s].", meta_data["index"])
+                    await opensearch.indices.refresh(index=meta_data["index"])
+                    meta_data["post-ingest-refresh"] = True
                 return meta_data
             except opensearchpy.exceptions.TransportError as e:
                 if e.status_code == 429 and attempt < retries - 1:

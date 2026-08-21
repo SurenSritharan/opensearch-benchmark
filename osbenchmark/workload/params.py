@@ -1348,6 +1348,7 @@ class BulkVectorsFromDataSetParamSource(VectorDataSetPartitionParamSource):
             self.PARAMS_NAME_ID_FIELD_NAME, params, self.DEFAULT_ID_FIELD_NAME
         )
         self.filter_attributes: List[Any] = params.get("filter_attributes", [])
+        self.post_ingest_refresh: bool = self._refresh_disabled_in_index_settings()
 
         self.action_buffer = None
         self.num_nested_vectors = 10
@@ -1362,8 +1363,34 @@ class BulkVectorsFromDataSetParamSource(VectorDataSetPartitionParamSource):
 
         self.logger = logging.getLogger(__name__)
 
+    def _refresh_disabled_in_index_settings(self) -> bool:
+        """Returns True if the target index has refresh_interval set to -1 or 0 (disabled)."""
+        for index in self.workload.indices:
+            if index.name != self.index_name:
+                continue
+            body = index.body or {}
+            settings = body.get("settings", {})
+            refresh_interval = settings.get(
+                "refresh_interval",
+                settings.get("index.refresh_interval")
+            )
+            if refresh_interval is None:
+                return False
+            # -1, "-1", 0, "0" all mean disabled
+            try:
+                return int(refresh_interval) < 0 or int(refresh_interval) == 0
+            except (ValueError, TypeError):
+                return str(refresh_interval).strip() in ("-1", "0")
+        return False
+
     def partition(self, partition_index, total_partitions):
         partition = super().partition(partition_index, total_partitions)
+        # Only the last partition issues the post-ingest refresh — one refresh
+        # covers all shards and all other clients' writes are already visible by
+        # the time it fires. Suppressing it on every other partition avoids
+        # redundant concurrent _refresh calls at end of ingest.
+        if not self._is_last_partition(partition_index, total_partitions):
+            partition.post_ingest_refresh = False
         if self.parent_data_set_corpus and not self.parent_data_set_path:
             parent_data_set_path = self._get_corpora_file_paths(
                 self.parent_data_set_corpus, self.parent_data_set_format
@@ -1554,7 +1581,11 @@ class BulkVectorsFromDataSetParamSource(VectorDataSetPartitionParamSource):
             self.current += size
         self.task_progress = (self.current / self.total, '%')
 
-        return {"body": body, "retries": self.retries, "size": size, "action-metadata-present": True}
+        result = {"body": body, "retries": self.retries, "size": size, "action-metadata-present": True}
+        is_last_batch = self.current >= self.num_vectors + self.offset
+        if self.post_ingest_refresh and is_last_batch:
+            result["post-ingest-refresh"] = True
+        return result
 
 
 def get_target(workload, params):

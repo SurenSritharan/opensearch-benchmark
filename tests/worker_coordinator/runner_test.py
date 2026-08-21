@@ -8077,3 +8077,51 @@ class BulkVectorDataSetTests(TestCase):
         self.assertEqual(429, ctx.exception.status_code)
         # 1 initial attempt + 2 retries = 3 total calls
         self.assertEqual(3, opensearch.bulk.call_count)
+
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_end')
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_start')
+    @mock.patch("opensearchpy.OpenSearch")
+    @run_async
+    async def test_post_ingest_refresh_called_when_enabled(self, opensearch, on_client_request_start, on_client_request_end):
+        """post-ingest-refresh=True should trigger opensearch.indices.refresh after a successful bulk."""
+        response = self._bulk_response([self._ok_item(0), self._ok_item(1)])
+        opensearch.bulk.return_value = as_future(response)
+        opensearch.indices.refresh.return_value = as_future(None)
+        opensearch.return_raw_response.return_value = None
+
+        bulk = runner.BulkVectorDataSet()
+        params = {
+            "body": ["action0", "doc0", "action1", "doc1"],
+            "action-metadata-present": True,
+            "index": "test-index",
+            "post-ingest-refresh": True,
+        }
+
+        result = await bulk(opensearch, params)
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result.get("post-ingest-refresh"))
+        opensearch.indices.refresh.assert_called_once_with(index="test-index")
+
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_end')
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_start')
+    @mock.patch("opensearchpy.OpenSearch")
+    @run_async
+    async def test_post_ingest_refresh_not_called_by_default(self, opensearch, on_client_request_start, on_client_request_end):
+        """post-ingest-refresh should not be called when the parameter is absent."""
+        response = self._bulk_response([self._ok_item(0), self._ok_item(1)])
+        opensearch.bulk.return_value = as_future(response)
+        opensearch.return_raw_response.return_value = None
+
+        bulk = runner.BulkVectorDataSet()
+        params = {
+            "body": ["action0", "doc0", "action1", "doc1"],
+            "action-metadata-present": True,
+            "index": "test-index",
+        }
+
+        result = await bulk(opensearch, params)
+
+        self.assertTrue(result["success"])
+        self.assertNotIn("post-ingest-refresh", result)
+        opensearch.indices.refresh.assert_not_called()
