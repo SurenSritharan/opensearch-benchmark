@@ -3758,82 +3758,9 @@ class BulkVectorsFromDataSetParamSourceTestCase(TestCase):
         with self.assertRaises(StopIteration):
             bulk_param_source_partition.params()
 
-    def test_post_ingest_refresh_only_on_last_batch(self):
+    def test_last_batch_flagged_only_on_last_batch(self):
+        """last-batch is set only on the final params() call for a partition."""
         num_vectors = 25
-        bulk_size = 10
-        data_set_path = create_data_set(
-            num_vectors,
-            self.DEFAULT_DIMENSION,
-            self.DEFAULT_TYPE,
-            Context.INDEX,
-            self.data_set_dir
-        )
-        index = workload.Index(
-            name=self.DEFAULT_INDEX_NAME,
-            body={"settings": {"refresh_interval": -1}},
-        )
-        test_param_source_params = {
-            "index": self.DEFAULT_INDEX_NAME,
-            "field": self.DEFAULT_VECTOR_FIELD_NAME,
-            "data_set_format": self.DEFAULT_TYPE,
-            "data_set_path": data_set_path,
-            "bulk_size": bulk_size,
-            "id-field-name": self.DEFAULT_ID_FIELD_NAME,
-        }
-        bulk_param_source = BulkVectorsFromDataSetParamSource(
-            workload.Workload(name="unit-test", indices=[index]), test_param_source_params)
-        partition = bulk_param_source.partition(0, 1)
-
-        params1 = partition.params()  # batch 1: vectors 0-9
-        params2 = partition.params()  # batch 2: vectors 10-19
-        params3 = partition.params()  # batch 3: vectors 20-24 (last)
-
-        self.assertNotIn("post-ingest-refresh", params1)
-        self.assertNotIn("post-ingest-refresh", params2)
-        self.assertTrue(params3["post-ingest-refresh"], "refresh should fire on last batch")
-
-        with self.assertRaises(StopIteration):
-            partition.params()
-
-    def test_post_ingest_refresh_only_on_last_partition(self):
-        """With multiple clients, only the last partition should issue a refresh."""
-        num_vectors = 20
-        bulk_size = 10
-        data_set_path = create_data_set(
-            num_vectors,
-            self.DEFAULT_DIMENSION,
-            self.DEFAULT_TYPE,
-            Context.INDEX,
-            self.data_set_dir
-        )
-        index = workload.Index(
-            name=self.DEFAULT_INDEX_NAME,
-            body={"settings": {"refresh_interval": -1}},
-        )
-        test_param_source_params = {
-            "index": self.DEFAULT_INDEX_NAME,
-            "field": self.DEFAULT_VECTOR_FIELD_NAME,
-            "data_set_format": self.DEFAULT_TYPE,
-            "data_set_path": data_set_path,
-            "bulk_size": bulk_size,
-            "id-field-name": self.DEFAULT_ID_FIELD_NAME,
-        }
-        bulk_param_source = BulkVectorsFromDataSetParamSource(
-            workload.Workload(name="unit-test", indices=[index]), test_param_source_params)
-
-        partition0 = bulk_param_source.partition(0, 2)  # not the last
-        partition1 = bulk_param_source.partition(1, 2)  # last
-
-        # partition 0: last batch must NOT refresh
-        p0 = partition0.params()
-        self.assertNotIn("post-ingest-refresh", p0)
-
-        # partition 1: last batch MUST refresh
-        p1 = partition1.params()
-        self.assertTrue(p1["post-ingest-refresh"], "last partition should refresh on its last batch")
-
-    def test_post_ingest_refresh_disabled_by_default(self):
-        num_vectors = 15
         bulk_size = 10
         data_set_path = create_data_set(
             num_vectors,
@@ -3854,16 +3781,54 @@ class BulkVectorsFromDataSetParamSourceTestCase(TestCase):
             workload.Workload(name="unit-test"), test_param_source_params)
         partition = bulk_param_source.partition(0, 1)
 
-        params1 = partition.params()  # non-last
-        params2 = partition.params()  # last
+        params1 = partition.params()  # batch 1: vectors 0-9
+        params2 = partition.params()  # batch 2: vectors 10-19
+        params3 = partition.params()  # batch 3: vectors 20-24 (last)
 
-        self.assertNotIn("post-ingest-refresh", params1)
-        self.assertNotIn("post-ingest-refresh", params2)
+        self.assertNotIn("last-batch", params1)
+        self.assertNotIn("last-batch", params2)
+        self.assertTrue(params3["last-batch"], "last-batch should be set on final batch")
 
-    def _make_bulk_source_with_index_settings(self, data_set_path, bulk_size, refresh_interval):
-        index = workload.Index(
-            name=self.DEFAULT_INDEX_NAME,
-            body={"settings": {"refresh_interval": refresh_interval}},
+        with self.assertRaises(StopIteration):
+            partition.params()
+
+    def test_last_batch_only_on_last_partition(self):
+        """With multiple clients, only the last partition emits last-batch=True."""
+        num_vectors = 20
+        bulk_size = 10
+        data_set_path = create_data_set(
+            num_vectors,
+            self.DEFAULT_DIMENSION,
+            self.DEFAULT_TYPE,
+            Context.INDEX,
+            self.data_set_dir
+        )
+        test_param_source_params = {
+            "index": self.DEFAULT_INDEX_NAME,
+            "field": self.DEFAULT_VECTOR_FIELD_NAME,
+            "data_set_format": self.DEFAULT_TYPE,
+            "data_set_path": data_set_path,
+            "bulk_size": bulk_size,
+            "id-field-name": self.DEFAULT_ID_FIELD_NAME,
+        }
+        bulk_param_source = BulkVectorsFromDataSetParamSource(
+            workload.Workload(name="unit-test"), test_param_source_params)
+
+        partition0 = bulk_param_source.partition(0, 2)  # not the last
+        partition1 = bulk_param_source.partition(1, 2)  # last
+
+        p0 = partition0.params()
+        self.assertNotIn("last-batch", p0)
+
+        p1 = partition1.params()
+        self.assertTrue(p1["last-batch"], "last partition should set last-batch on its final batch")
+
+    def test_no_auto_refresh_when_interval_is_positive(self):
+        """last-batch is still emitted; the runner decides whether to refresh based on live settings."""
+        num_vectors = 15
+        bulk_size = 10
+        data_set_path = create_data_set(
+            num_vectors, self.DEFAULT_DIMENSION, self.DEFAULT_TYPE, Context.INDEX, self.data_set_dir
         )
         test_params = {
             "index": self.DEFAULT_INDEX_NAME,
@@ -3873,54 +3838,16 @@ class BulkVectorsFromDataSetParamSourceTestCase(TestCase):
             "bulk_size": bulk_size,
             "id-field-name": self.DEFAULT_ID_FIELD_NAME,
         }
-        return BulkVectorsFromDataSetParamSource(
-            workload.Workload(name="unit-test", indices=[index]), test_params
+        source = BulkVectorsFromDataSetParamSource(
+            workload.Workload(name="unit-test"), test_params
         )
-
-    def test_auto_refresh_when_interval_is_minus_one(self):
-        num_vectors = 15
-        bulk_size = 10
-        data_set_path = create_data_set(
-            num_vectors, self.DEFAULT_DIMENSION, self.DEFAULT_TYPE, Context.INDEX, self.data_set_dir
-        )
-        source = self._make_bulk_source_with_index_settings(data_set_path, bulk_size, -1)
-        partition = source.partition(0, 1)
-
-        params1 = partition.params()  # non-last
-        params2 = partition.params()  # last
-
-        self.assertNotIn("post-ingest-refresh", params1, "should not refresh before last batch")
-        self.assertTrue(params2["post-ingest-refresh"], "should auto-refresh on last batch when interval is -1")
-
-    def test_auto_refresh_when_interval_is_minus_one_string(self):
-        num_vectors = 15
-        bulk_size = 10
-        data_set_path = create_data_set(
-            num_vectors, self.DEFAULT_DIMENSION, self.DEFAULT_TYPE, Context.INDEX, self.data_set_dir
-        )
-        source = self._make_bulk_source_with_index_settings(data_set_path, bulk_size, "-1")
         partition = source.partition(0, 1)
 
         params1 = partition.params()
         params2 = partition.params()
 
-        self.assertNotIn("post-ingest-refresh", params1)
-        self.assertTrue(params2["post-ingest-refresh"], "should auto-refresh on last batch when interval is '-1'")
-
-    def test_no_auto_refresh_when_interval_is_positive(self):
-        num_vectors = 15
-        bulk_size = 10
-        data_set_path = create_data_set(
-            num_vectors, self.DEFAULT_DIMENSION, self.DEFAULT_TYPE, Context.INDEX, self.data_set_dir
-        )
-        source = self._make_bulk_source_with_index_settings(data_set_path, bulk_size, "30s")
-        partition = source.partition(0, 1)
-
-        params1 = partition.params()
-        params2 = partition.params()
-
-        self.assertNotIn("post-ingest-refresh", params1)
-        self.assertNotIn("post-ingest-refresh", params2)
+        self.assertNotIn("last-batch", params1)
+        self.assertTrue(params2["last-batch"])
 
     def _check_params(
             self,

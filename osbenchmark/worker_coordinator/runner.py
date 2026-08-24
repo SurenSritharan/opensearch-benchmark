@@ -963,12 +963,54 @@ class BulkVectorDataSet(Runner):
 
     NAME = "bulk-vector-data-set"
 
+    # Sentinel so we query the cluster exactly once per ingest run.
+    # None  = not yet checked
+    # True  = refresh is disabled on the index → issue post-ingest refresh
+    # False = refresh is enabled → do nothing
+    _refresh_disabled: bool | None = None
+
     async def __call__(self, opensearch, params): # pylint: disable=too-many-nested-blocks
         with_action_metadata = params.get("action-metadata-present", True)
         unit = params.get("unit", "docs")
         retries = parse_int_parameter("retries", params, 0) + 1
         detailed_results = params.get("detailed-results", True)
-        post_ingest_refresh = params.get("post-ingest-refresh", False)
+        is_last_batch = params.get("last-batch", False)
+
+        # Query the live cluster once to check whether refresh is disabled.
+        # We only need the answer when processing the last batch, but we fetch
+        # it on the first call (when the sentinel is still None) so that the
+        # single network round-trip is paid early and never repeated.
+        if self._refresh_disabled is None:
+            index_name = params.get("index")
+            if index_name:
+                try:
+                    resp = await opensearch.indices.get_settings(
+                        index=index_name,
+                        name="index.refresh_interval",
+                        flat_settings=True,
+                    )
+                    # Response: { "<index>": { "settings": { "index.refresh_interval": "-1" } } }
+                    interval = None
+                    for idx_data in resp.values():
+                        interval = idx_data.get("settings", {}).get("index.refresh_interval")
+                        break
+                    if interval is not None:
+                        try:
+                            self._refresh_disabled = int(interval) < 0 or int(interval) == 0
+                        except (ValueError, TypeError):
+                            self._refresh_disabled = str(interval).strip() in ("-1", "0")
+                    else:
+                        self._refresh_disabled = False
+                except Exception as e:  # pylint: disable=broad-except
+                    self.logger.warning(
+                        "Could not fetch refresh_interval for [%s] — skipping post-ingest refresh. Error: %s",
+                        index_name, e,
+                    )
+                    self._refresh_disabled = False
+            else:
+                self._refresh_disabled = False
+
+        post_ingest_refresh = self._refresh_disabled and is_last_batch
 
         if not detailed_results:
             opensearch.return_raw_response()

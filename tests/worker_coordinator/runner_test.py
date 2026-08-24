@@ -8082,11 +8082,14 @@ class BulkVectorDataSetTests(TestCase):
     @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_start')
     @mock.patch("opensearchpy.OpenSearch")
     @run_async
-    async def test_post_ingest_refresh_called_when_enabled(self, opensearch, on_client_request_start, on_client_request_end):
-        """post-ingest-refresh=True should trigger opensearch.indices.refresh after a successful bulk."""
+    async def test_post_ingest_refresh_called_when_refresh_disabled_on_cluster(self, opensearch, on_client_request_start, on_client_request_end):
+        """Runner queries live cluster; refresh fires on last-batch when interval is -1."""
         response = self._bulk_response([self._ok_item(0), self._ok_item(1)])
         opensearch.bulk.return_value = as_future(response)
         opensearch.indices.refresh.return_value = as_future(None)
+        opensearch.indices.get_settings.return_value = as_future(
+            {"test-index": {"settings": {"index.refresh_interval": "-1"}}}
+        )
         opensearch.return_raw_response.return_value = None
 
         bulk = runner.BulkVectorDataSet()
@@ -8094,7 +8097,7 @@ class BulkVectorDataSetTests(TestCase):
             "body": ["action0", "doc0", "action1", "doc1"],
             "action-metadata-present": True,
             "index": "test-index",
-            "post-ingest-refresh": True,
+            "last-batch": True,
         }
 
         result = await bulk(opensearch, params)
@@ -8109,10 +8112,13 @@ class BulkVectorDataSetTests(TestCase):
     @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_start')
     @mock.patch("opensearchpy.OpenSearch")
     @run_async
-    async def test_post_ingest_refresh_not_called_by_default(self, opensearch, on_client_request_start, on_client_request_end):
-        """post-ingest-refresh should not be called when the parameter is absent."""
+    async def test_post_ingest_refresh_not_called_when_refresh_enabled_on_cluster(self, opensearch, on_client_request_start, on_client_request_end):
+        """Runner skips refresh when cluster reports a positive refresh_interval."""
         response = self._bulk_response([self._ok_item(0), self._ok_item(1)])
         opensearch.bulk.return_value = as_future(response)
+        opensearch.indices.get_settings.return_value = as_future(
+            {"test-index": {"settings": {"index.refresh_interval": "1s"}}}
+        )
         opensearch.return_raw_response.return_value = None
 
         bulk = runner.BulkVectorDataSet()
@@ -8120,6 +8126,34 @@ class BulkVectorDataSetTests(TestCase):
             "body": ["action0", "doc0", "action1", "doc1"],
             "action-metadata-present": True,
             "index": "test-index",
+            "last-batch": True,
+        }
+
+        result = await bulk(opensearch, params)
+
+        self.assertTrue(result["success"])
+        self.assertNotIn("post-ingest-refresh", result)
+        opensearch.indices.refresh.assert_not_called()
+
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_end')
+    @mock.patch('osbenchmark.client.RequestContextHolder.on_client_request_start')
+    @mock.patch("opensearchpy.OpenSearch")
+    @run_async
+    async def test_post_ingest_refresh_not_called_on_non_last_batch(self, opensearch, on_client_request_start, on_client_request_end):
+        """Refresh must not fire even if refresh is disabled, unless this is the last batch."""
+        response = self._bulk_response([self._ok_item(0), self._ok_item(1)])
+        opensearch.bulk.return_value = as_future(response)
+        opensearch.indices.get_settings.return_value = as_future(
+            {"test-index": {"settings": {"index.refresh_interval": "-1"}}}
+        )
+        opensearch.return_raw_response.return_value = None
+
+        bulk = runner.BulkVectorDataSet()
+        params = {
+            "body": ["action0", "doc0", "action1", "doc1"],
+            "action-metadata-present": True,
+            "index": "test-index",
+            # last-batch absent
         }
 
         result = await bulk(opensearch, params)
