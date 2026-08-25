@@ -1645,11 +1645,6 @@ class IndexStats(InternalTelemetryDevice):
     def collect_doc_count(self):
         try:
             index = ",".join(self.index_names) if self.index_names else None
-            # Explicitly refresh the index to flush all in-memory buffers before getting the final document count
-            try:
-                self.client.indices.refresh(index=index)
-            except BaseException:
-                self.logger.warning("Could not refresh index %s before collecting doc count.", index)
 
             cat_result = self.client.cat.indices(index=index, format="json", h="index,docs.count")
             if cat_result:
