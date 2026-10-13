@@ -106,7 +106,7 @@ install_requires = [
     "h5py>=3.10.0",
     # License: BSD
     # Required for knnvector workload
-    "numpy>=1.24.2,<=1.26.4",
+    "numpy>=1.24.2,<3",
     # License: Apache 2.0
     # Required for Kafka message producer
     "aiokafka>=0.11.0",
