@@ -936,7 +936,7 @@ class VectorDataSetPartitionParamSource(ParamSource):
         self.total = 1
         self.current = 0
         self.task_progress = (0, '%')
-        self.offset = 0
+        self.offset = parse_int_parameter("offset", params, 0)
         self.data_set: DataSet = None
         self.corpora = self.extract_corpora(self.data_set_corpus, self.data_set_format)
 
@@ -1003,7 +1003,7 @@ class VectorDataSetPartitionParamSource(ParamSource):
         partition_x = copy.copy(self)
 
         min_num_vectors_per_partition = int(self.total_num_vectors / total_partitions)
-        partition_x.offset = int(partition_index * min_num_vectors_per_partition)
+        partition_x.offset = self.offset + int(partition_index * min_num_vectors_per_partition)
         partition_x.num_vectors = min_num_vectors_per_partition
 
         # if partition is not divided equally, add extra docs to the last partition
